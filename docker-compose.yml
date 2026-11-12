@@ -6,12 +6,30 @@ services:
     ports:
       - "8000:8000"
     restart: unless-stopped
-    # 不挂载任何宿主卷：诊断完全基于浏览器提交的 JSON 快照
+    # 不挂载任何宿主目录/卷：诊断完全基于浏览器提交的 JSON 快照；
+    # 影子树写在 tmpfs（内存）里，容器退出即消失。
     read_only: true
     security_opt:
       - no-new-privileges:true
+    # 显式禁用特权模式，并只授予编排 chroot/降权/清能力所需的最小 capability：
+    #   CHOWN   还原节点 uid/gid
+    #   FOWNER/DAC_OVERRIDE  在影子树上 chmod/setfacl（绕过属主 DAC）
+    #   SETUID/SETGID        子进程切换请求身份
+    #   SYS_CHROOT           每请求 chroot 到独立临时树
+    #   SETPCAP              清空子进程 capability bounding set
+    privileged: false
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
+      - SETPCAP
+      - SYS_CHROOT
+    tmpfs:
+      - /tmp:size=64m,mode=1777
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status==200 else 1)"]
       interval: 10s

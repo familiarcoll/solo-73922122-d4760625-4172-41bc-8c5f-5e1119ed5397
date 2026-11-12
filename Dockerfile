@@ -6,14 +6,25 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# acl：提供 setfacl，用于在影子树上还原快照中的 POSIX.1e 访问 ACL；
+# 不安装任何多余组件。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends acl \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY app /app/app
 
-# 非 root 运行，容器内也不挂载宿主目录，保证“不访问宿主文件”
-RUN useradd --create-home --uid 10001 diaguser
-USER diaguser
+# 编排进程必须以 root 启动才能 chroot/setuid；真正执行 open 的沙箱子进程
+# 会按请求 UID/GID 降权、清空全部 capability（见 app/sandbox_child.py）。
+# 容器本身在 compose 中仅授予所需 capability 且禁用 privileged。
+USER root
+
+# 影子树的工作根：compose 中以 tmpfs 挂载，不落宿主磁盘、不挂载宿主目录
+ENV DIAG_SANDBOX_TMP=/tmp/diag-sandbox
+RUN mkdir -p /tmp/diag-sandbox && chmod 700 /tmp/diag-sandbox
 
 EXPOSE 8000
 

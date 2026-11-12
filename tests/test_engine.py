@@ -410,6 +410,19 @@ class TestValidation:
         with pytest.raises(RequestError):
             build_request({"uid": 1, "gid": 0, "supp_groups": ["x"], "path": "/f"})
 
+    def test_request_too_many_supp_groups(self):
+        from app.engine import MAX_SUPP_GROUPS
+        with pytest.raises(RequestError) as ei:
+            build_request({"uid": 1, "gid": 0,
+                           "supp_groups": [1] * (MAX_SUPP_GROUPS + 1), "path": "/f"})
+        assert ei.value.loc == ["supp_groups"]
+
+    def test_request_path_too_long(self):
+        long_path = "/" + "a" * 4100
+        with pytest.raises(RequestError) as ei:
+            build_request({"uid": 1, "gid": 0, "supp_groups": [], "path": long_path})
+        assert ei.value.loc == ["path"]
+
 
 class TestParsingEdge:
     def test_integer_and_4digit_mode(self):

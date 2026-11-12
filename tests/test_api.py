@@ -24,7 +24,8 @@ def test_health_and_index():
     assert client.get("/health").json() == {"status": "ok"}
     r = client.get("/")
     assert r.status_code == 200
-    assert "离线诊断" in r.text
+    assert "内核实测" in r.text
+    assert "模拟" in r.text
 
 
 def test_diagnose_ok():
@@ -33,6 +34,24 @@ def test_diagnose_ok():
     body = r.json()
     assert body["ok"] is True
     assert body["result"]["readable"] is True
+    # 模拟与内核实测必须是两条独立证据链，字段同时存在且互不冒充
+    assert "real_check" in body and "consistency" in body
+    assert "measured" in body["real_check"]
+    assert body["consistency"]["status"] in {
+        "consistent", "divergent", "unverifiable"
+    }
+    # 无 root 的测试环境：应明确“无法实测”，而不是给伪实测结论
+    assert body["real_check"]["measured"] is False
+    assert body["consistency"]["status"] == "unverifiable"
+
+
+def test_diagnose_keeps_simulation_trace_intact():
+    r = client.post("/api/diagnose", json={"snapshot": SNAP, "request": REQ})
+    result = r.json()["result"]
+    # 模拟轨迹完整保留，前端仍可逐步展示
+    assert result["steps"]
+    assert result["category"] == "ok"
+    assert result["snapshot_warnings"] == []
 
 
 def test_snapshot_error_has_loc():

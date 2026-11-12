@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>共享文件服务器读取权限 · 离线诊断</title>
+<title>共享文件服务器读取权限 · 模拟与内核实测双证据诊断台</title>
 <style>
   :root {
     --bg: #0f172a; --panel: #1e293b; --panel2: #24334d; --line: #334155;
@@ -79,15 +79,33 @@
   .hint { color: var(--muted); font-size: 12px; }
   .kv { display: grid; grid-template-columns: 110px 1fr; gap: 4px 10px; font-size: 12.5px; margin-top: 6px; }
   .kv .k { color: var(--muted); }
-  .scroll { max-height: 560px; overflow-y: auto; padding-right: 4px; }
+  .scroll { max-height: 720px; overflow-y: auto; padding-right: 4px; }
   .desc { color: var(--muted); font-size: 12.5px; margin: 6px 0 0; }
   .pill { font-family: var(--mono); font-size: 11px; padding: 1px 7px; border-radius: 6px; background: var(--panel2); border: 1px solid var(--line); color: var(--muted); }
+  /* —— 内核实测卡片 —— */
+  .real-card { border: 1px solid var(--line); border-radius: 10px; padding: 13px 15px; margin-bottom: 14px; background: #121d31; }
+  .real-card.measured-ok { border-color: rgba(56,189,248,.55); }
+  .real-card.measured-bad { border-color: rgba(239,68,68,.55); }
+  .real-card.unmeasured { border-color: rgba(245,158,11,.55); background: rgba(245,158,11,.07); }
+  .real-card h3 { margin: 0 0 8px; font-size: 15px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .kernel-badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+  .kernel-badge.allow { background: var(--ok); color: #052e16; }
+  .kernel-badge.deny { background: var(--bad); color: #450a0a; }
+  .kernel-badge.none { background: var(--warn); color: #451a03; }
+  .consistency { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+  .consistency.consistent { background: rgba(34,197,94,.2); color: #86efac; border: 1px solid rgba(34,197,94,.5); }
+  .consistency.divergent { background: rgba(239,68,68,.2); color: #fca5a5; border: 1px solid rgba(239,68,68,.55); }
+  .consistency.unverifiable { background: rgba(245,158,11,.18); color: #fcd34d; border: 1px solid rgba(245,158,11,.5); }
+  .section-tag { font-size: 12px; color: var(--muted); margin: 16px 0 8px; font-weight: 600; }
+  .mono-err { font-family: var(--mono); color: #fca5a5; font-weight: 700; }
+  .skip-list { margin: 6px 0 0; padding-left: 18px; font-size: 12px; color: var(--muted); }
+  .skip-list li { margin: 2px 0; }
 </style>
 </head>
 <body>
 <header>
-  <h1>共享文件服务器 · 读取权限离线诊断台</h1>
-  <p>在浏览器编辑运维采集的目录快照 JSON 与读取请求，按 Linux 无特权进程规则逐级模拟 namei 解析与 DAC/POSIX ACL 判定。全程仅在内存计算，<b>不访问宿主机任何文件</b>。</p>
+  <h1>共享文件服务器 · 读取权限诊断台（模拟 + 内核实测双证据）</h1>
+  <p>在浏览器编辑运维采集的目录快照 JSON 与读取请求。后端先在内存中按 Linux 无特权进程规则<b>模拟</b> namei 解析与 DAC/POSIX ACL 判定；再按快照在每请求独立的临时目录构建影子文件树，于独立 <b>chroot 子进程</b>内切到请求 UID/GID、清空 capability，用真实内核 <code>open(O_RDONLY)</code>+<code>fstat</code> <b>实测</b>。两条证据链分别展示，模拟不冒充实测；不挂载宿主目录。</p>
 </header>
 
 <div class="wrap">
@@ -123,9 +141,9 @@
 
   <!-- ================= 右：结果 ================= -->
   <section class="panel">
-    <h2>② 诊断结论与逐步解析</h2>
+    <h2>② 内核实测结论、一致性对照与模拟逐步解析</h2>
     <div class="body scroll" id="resultPane">
-      <p class="hint">点击「运行诊断」后，这里会展示：能否读取、首个失败原因与分类、实际解析步骤、每一步采用的权限项。</p>
+      <p class="hint">点击「运行诊断」后，这里会依次展示：① 内核实测结论与 errno；② 模拟与实测是否一致；③ 模拟推演的逐步解析轨迹（两条证据链分开呈现）。</p>
     </div>
   </section>
 </div>
@@ -249,9 +267,61 @@ function renderStep(s, idx) {
     </div>`;
 }
 
-function renderResult(res) {
+function renderRealCheck(real, consistency) {
+  if (!real || !real.measured) {
+    const msg = real ? esc(real.message || "实测未执行") : "无实测结果";
+    const stage = real && real.stage ? `<span class="pill">${esc(real.stage)}</span> ` : "";
+    const skips = (real && real.skipped_nodes && real.skipped_nodes.length)
+      ? `<ul class="skip-list">${real.skipped_nodes.map((s) =>
+          `<li><b class="mono">${esc(s.path)}</b>：${esc(s.reason)}</li>`).join("")}</ul>` : "";
+    return `<div class="real-card unmeasured">
+      <h3>🧪 内核实测：<span class="kernel-badge none">无法实测</span></h3>
+      <div>${stage}${msg}</div>
+      ${real && real.detail ? `<div class="hint" style="margin-top:5px">${esc(real.detail)}</div>` : ""}
+      ${skips}
+      <div class="hint" style="margin-top:8px">准备或隔离失败时不进行实测，下面的结论仅为模拟推演，不得当作内核结论。</div>
+    </div>`;
+  }
+
+  const allowed = !!real.readable;
+  const cardCls = allowed ? "measured-ok" : "measured-bad";
+  const badge = allowed
+    ? '<span class="kernel-badge allow">内核放行 open(O_RDONLY)</span>'
+    : '<span class="kernel-badge deny">内核拒绝读取</span>';
+  const errnoCell = real.errno
+    ? `<span class="mono-err">${esc(real.errno)}</span>（${real.errno_int ?? ""} ${esc(real.message || "")}）`
+    : (allowed ? "无（成功）" : "无 errno（非普通文件）");
+  const ident = real.identity
+    ? `uid=${esc(real.identity.uid)} gid=${esc(real.identity.gid)} groups=[${(real.identity.groups || []).map(esc).join(",")}]`
+    : "—";
+  const skips = (real.skipped_nodes && real.skipped_nodes.length)
+    ? `<ul class="skip-list">${real.skipped_nodes.map((s) =>
+        `<li><b class="mono">${esc(s.path)}</b>：${esc(s.reason)}</li>`).join("")}</ul>` : "";
+  return `<div class="real-card ${cardCls}">
+    <h3>🧪 内核实测（独立 chroot 子进程 · 降权后实测） ${badge}
+      <span class="consistency ${esc(consistency.status)}">模拟/实测 ${esc(consistency.label)}</span>
+    </h3>
+    <div class="kv">
+      <span class="k">内核 errno</span><span>${errnoCell}</span>
+      <span class="k">内核分类</span><span class="mono">${esc(real.kernel_category || "—")}</span>
+      <span class="k">fstat 普通文件</span><span>${real.is_regular_file === null ? "—（open 失败）" : real.is_regular_file ? "是 ✅" : "否 ⛔"}</span>
+      <span class="k">实测身份</span><span class="mono">${ident}</span>
+      <span class="k">影子树节点</span><span class="mono">${real.tree_node_count ?? "—"} 个；ACL 落地 ${real.acl_applied ?? 0} 处</span>
+      <span class="k">对照说明</span><span>${esc(consistency.reason || "")}</span>
+    </div>
+    ${skips}
+  </div>`;
+}
+
+function renderResult(body) {
+  const res = body.result;
+  const real = body.real_check;
+  const consistency = body.consistency || { status: "unverifiable", label: "无法对照", reason: "无对照信息" };
+
+  const realCard = renderRealCheck(real, consistency);
+
   const head = `<div class="verdict ${res.readable ? "ok" : "bad"}">
-      <h3>${verdictBadge(res.category)}${res.readable ? "可以读取该普通文件" : "读取被阻止"}</h3>
+      <h3>${verdictBadge(res.category)}【模拟结论】${res.readable ? "可以读取该普通文件" : "读取被阻止"}</h3>
       <div>${esc(res.message)}</div>
       <div class="kv">
         <span class="k">软链接跟随</span><span class="mono">${res.symlink_follows} 次（上限 40）</span>
@@ -265,8 +335,9 @@ function renderResult(res) {
     warn = `<div class="warnbox"><b>⚠ 快照告警（不影响运行）</b><ul>${res.snapshot_warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></div>`;
   }
 
+  const tag = `<div class="section-tag">🧭 模拟轨迹（纯快照推演，非内核执行；与上方内核实测相互独立）</div>`;
   const steps = `<div class="steps">${res.steps.map((s, i) => renderStep(s, i)).join("")}</div>`;
-  return head + warn + steps;
+  return realCard + head + warn + tag + steps;
 }
 
 async function postJSON(url, body) {
@@ -283,7 +354,7 @@ $("runBtn").addEventListener("click", async () => {
   if (!rp.ok) { $("resultPane").innerHTML = renderError({ error_type: "request_error", message: rp.error, loc_text: "$.request" }); return; }
   $("resultPane").innerHTML = `<p class="hint">诊断中…</p>`;
   const { data } = await postJSON("/api/diagnose", { snapshot: sp.data, request: rp.data });
-  $("resultPane").innerHTML = data.ok ? renderResult(data.result) : renderError(data);
+  $("resultPane").innerHTML = data.ok ? renderResult(data) : renderError(data);
 });
 
 $("validateBtn").addEventListener("click", async () => {

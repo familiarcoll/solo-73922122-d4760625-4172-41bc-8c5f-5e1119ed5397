@@ -20,6 +20,9 @@ from typing import Any, Optional
 MAX_NODES = 100
 # Linux include/linux/namei.h: #define MAXSYMLINKS 40
 MAX_SYMLINKS = 40
+# setgroups(2) 上限与路径字节上限（linux/limits.h PATH_MAX）
+MAX_SUPP_GROUPS = 65536
+MAX_PATH_BYTES = 4096
 
 VALID_TYPES = {"file", "directory", "symlink", "other"}
 VALID_ACL_TYPES = {"user_obj", "user", "group_obj", "group", "mask", "other"}
@@ -327,6 +330,12 @@ def build_request(data: Any) -> dict[str, Any]:
     groups = data.get("supp_groups", [])
     if not isinstance(groups, list) or not all(_is_int(g) and g >= 0 for g in groups):
         raise RequestError("supp_groups 必须是非负整数数组", ["supp_groups"])
+    # 上限对齐内核 setgroups(2) 的 NGROUPS_MAX，避免超长列表导致降权失败或资源浪费
+    if len(groups) > MAX_SUPP_GROUPS:
+        raise RequestError(
+            f"supp_groups 最多 {MAX_SUPP_GROUPS} 个（内核 NGROUPS_MAX 上限）",
+            ["supp_groups"],
+        )
     path = data.get("path")
     if not isinstance(path, str) or not path:
         raise RequestError("path 必须是非空字符串", ["path"])
@@ -334,6 +343,11 @@ def build_request(data: Any) -> dict[str, Any]:
         raise RequestError("path 必须是绝对路径（以 / 开头）", ["path"])
     if "\x00" in path:
         raise RequestError("path 不能包含 NUL 字符", ["path"])
+    # PATH_MAX=4096；超长路径在内核 open 时必然 ENAMETOOLONG，提前拒绝更清晰
+    if len(path.encode("utf-8")) > MAX_PATH_BYTES:
+        raise RequestError(
+            f"path 字节长度超过 {MAX_PATH_BYTES}（PATH_MAX）", ["path"]
+        )
     return {
         "uid": int(uid),
         "gid": int(gid),
